@@ -9,17 +9,35 @@ Author: ulno
 
 """
 USAGE = """
-Bi-directional pre-processor (braindumppp)
+braindumpp input-dir output-dir
+
+braindumppp is a bi-directional include and link enabler pre-processor for static website generators.
+
+Parameters:
+1. Input directory - read all files from this directory (the generated index, will also be stored here)
+2. Output directory - copy and transform files into this directory
 
 This is a command-line tool allowing to embed/include referenced files
-into another file. While doing this it creates an index to also allow
+into other files. While doing this, it creates an index to also allow
 the inclusion of the reference into the referenced file.
 This leads to the built of a bi-directional graph which can be
 traversed starting at any document.
+The tool works on a directory and all its sub-directories.
+It handles the following extensions (unknown extensions will
+be copied just raw):
+- md markdown
+- txt raw text or markdown
+- rst restructured text
+- tex latex
+- lyx LaTeX frontend
+- html
+- xml
+
 
 The idea/vision is to create a pre-processor for static website
 generators like jekkyl, hugo, pelican, or nikola to turn them into a
-thought-mapping tool.
+thought-mapping tool. It also allows to parse text editing programming
+languages like latex or lyx.
 
 It should lead to an advanced note taking and mind mapping system, which
 I call initially just braindump (maybe TSAR - Text Storage and Retrieval
@@ -82,6 +100,7 @@ Remarks:
 
 import sys
 import os
+import shutil
 import re
 import yaml # for loading and saving the index
 import difflib  # to allow fuzzy string matching
@@ -95,6 +114,18 @@ MATCH_COMMAND = re.compile(r'\!\!(i|\ |r|l)([^\!]*)\!')
 
 COMMENT = "!!#"
 
+EXTENSIONS = ["md", "txt", "rst", "lyx", "tex", "html", "xml"]
+LABEL_FORMATS = {  # Labels/Anchors in specific markups
+    "md": '<a name="%s"/>',
+    "rst": '<a name="%s"/>',
+    "html": '<a name="%s"/>',
+    "xml": '<a name="%s"/>'
+}
+LINK_FORMATS = {  # Links in specific markups
+    "md": ("[%(link)s]","[%(label)s](%(link)s)"),
+    "rst": ("`%(link)s <%(link)s>`_","`%(label)s <%(link)s>`_"),
+    "html": ('<a href="%(link)s">%(link)s</a>','<a href="%((link)s">%(label)s</a>'),
+}
 # global initialization
 # This matches files-paths minus their extension to a list of pairs
 # TODO: rethink how to really handle the extensions
@@ -102,7 +133,7 @@ COMMENT = "!!#"
 # The second element of the pair a sorted list with all the line-numbers from where  file
 index_list = {}
 reverse_index_list = {}
-root_path = "."
+root_input_path = "."
 index_file_path = None
 # indentation = 0  # usually not indented
 
@@ -147,13 +178,14 @@ def add_to_index(current_path, from_path, from_label, to_label):
     add_to_reverse_index(current_path,from_path,from_label,to_label)
 
 
-def add_backlink(current_path, from_path, from_label, to_label):
+def add_backlink(output_file, file_type, current_path, from_path, from_label, to_label):
     # TODO: add threshold
     if from_path != None and from_path != "":
         label_name="__blt_" + from_path # BackLinkTarget
         if from_label != None and from_label != "":
             label_name += "_" + from_label
-        write('<a name="%s"/>'%label_name)
+        if output_file is not None:
+            output_file.write(LABEL_FORMATS[file_type] % {"label",label_name})
         hit = find_file_in_tree(from_path)
         if hit != "":
             add_to_index(current_path, hit,from_label,to_label)
@@ -161,7 +193,7 @@ def add_backlink(current_path, from_path, from_label, to_label):
             add_to_index(current_path, from_path, from_label, to_label)
 
 
-def command_input(current_path, arg, indentation=""):
+def command_input(output_file, file_type, current_path, arg, indentation=""):
     # TODO: check number of arguments and show warning if too many
     # parse args
     args = arg.split()
@@ -178,12 +210,12 @@ def command_input(current_path, arg, indentation=""):
         from_path = from_split[0]
 
     # TODO: determine exect from_path with search in tree already here
-    add_backlink(current_path, from_path, from_label, to_label)
+    add_backlink(output_file, file_type, current_path, from_path, from_label, to_label)
 
-    parse_file(from_path,from_label,to_label,threshold=0.8,indentation=indentation)
+    parse_file(from_path, file_type, from_label, to_label, threshold=0.8, indentation=indentation, output_file=output_file)
 
 
-def command_link( current_path, arg, threshold=0.8 ):
+def command_link( output_file, file_type, current_path, arg, threshold=0.8 ):
     # create an internal link (to another document in the same space)
     # TODO: check number of arguments and show warning if too many
     # parse args
@@ -203,13 +235,14 @@ def command_link( current_path, arg, threshold=0.8 ):
     # TODO: resolve the path better and include current_path
     p = find_file_in_tree( from_path, threshold=threshold )
 
-    add_backlink(current_path, from_path, from_label, None)
+    add_backlink(output_file, file_type, current_path, from_path, from_label, None)
 
     # TODO:support also non-markdown
-    if link_text is not None:
-        write("[%s](%s)" % (link_text, p))
-    else:
-        write("[%s]" % p)
+    if output_file is not None:
+        if link_text is not None:
+            output_file.write(LINK_FORMATS[file_type][1] % {"label": link_text, "link":p})
+        else:
+            output_file.write(LINK_FORMATS[file_type][0] % {"link",p})
 
 
 def command_label( arg ):
@@ -220,7 +253,7 @@ def command_label( arg ):
     return s[0]
 
 
-def command_references( current_path, current_label, arg ):
+def command_references( output_file, file_type, current_path, current_label, arg ):
     # TODO: check number of arguments and show warning if too many
     # TODO: add threshold
     s = arg.split()
@@ -239,7 +272,8 @@ def command_references( current_path, current_label, arg ):
                 if to_label is not None:
                     output += "to-label: %s " % to_label
             if output != "":
-                write("references: %s"%output)
+                if output_file is not None:
+                    output_file.write("references: %s"%output)
         else:  # no backlinks found
             eprint("No incoming backlinks for %s" % current_path)
 
@@ -251,7 +285,9 @@ def command_references( current_path, current_label, arg ):
 # }
 
 
-def parse_file(filename_approximation, from_label=None, to_label=None, threshold=0.8, indentation=""):
+def parse_file(filename_approximation, file_type, from_label=None,
+               to_label=None, threshold=0.8, indentation="",
+               output_file = None):
     # first, we need to find the file
     # then match all the lines
 
@@ -259,6 +295,7 @@ def parse_file(filename_approximation, from_label=None, to_label=None, threshold
     # TODO: implement reverse links
 
     # global indentation
+    global root_input_path
 
     count = 0
     printing = from_label is None
@@ -266,136 +303,157 @@ def parse_file(filename_approximation, from_label=None, to_label=None, threshold
     if p is not None:
         count += 1
         first = True
-        for l in open(os.path.join(root_path,p)):
+        for l in open(os.path.join(root_input_path, p)):
             if l.startswith("!!!"):
-                write(l[3:])  # do not parse this line but remove the exclamation marks
+                if output_file is not None:
+                    output_file.write(l[3:])  # do not parse this line but remove the exclamation marks
                 continue
             # scan for comment and eventually cut it off
             comment_find = l.find(COMMENT)
             if comment_find != -1:
                 line_ending = ""
-                if(l[-1] == "\n"):
+                if l[-1] == "\n":
                     line_ending = "\n"
-                    if(len(l)>1 and l[-2] == "\r"):
+                    if len(l)>1 and l[-2] == "\r":
                         line_ending = "\r\n"
                 l = l[0:comment_find] + line_ending
             # first do current indentation
             if first:
                 first = False
             else:
-                if printing:
+                if printing and output_file is not None:
                     # write(" " * indentation) # if not first line indent (else already indented)
                     line_copy = l.strip()
                     if len(line_copy) > 0: # ignore lines with only whitespace
-                        write(indentation) # if not first line indent (else already indented)
+                        output_file.write(indentation) # if not first line indent (else already indented)
             current_start = 0
             for m in MATCH_COMMAND.finditer(l):
                 extra_indent = m.start()
                 old_indentation = indentation
-                indentation = indentation + l[current_start:extra_indent]
-                if printing:
-                    write(l[current_start:extra_indent]) # already print prefix
+                indentation += l[current_start:extra_indent]
+                if printing and output_file is not None:
+                    output_file.write(l[current_start:extra_indent]) # already print prefix
                 current_start = m.end()
                 # indentation += extra_indent # the future may be indented
                 t = tuple(m.groups()[1:])
                 label = None
                 # label = command_lookup[m.groups()[0]](*t)
                 c = m.groups()[0]
-                if c == ' ':
-                    command_link(p, *t)
-                elif c == 'i':
-                    command_input(p, *t, indentation=indentation)
-                elif c == 'l':
+                if c == 'l': # allow label detection even when not printing
                     label = command_label(*t)
-                elif c == 'r':
-                    command_references(p, label, *t)
-                if from_label != None and label != None:  # There was actually a lable found
-                    if label == from_label: # TODO: compare fuzzy
+                elif printing:
+                    if c == ' ':
+                        command_link(output_file, file_type, p, *t)
+                    elif c == 'i':
+                        command_input(output_file, file_type, p, *t, indentation=indentation)
+                    elif c == 'r':
+                        command_references(output_file, file_type, p, label, *t)
+                if from_label is not None and label is not None:  # There was actually a label found
+                    if label == from_label:  # TODO: compare fuzzy
                         printing = True
                     else:
                         # if no to-label is given, all other labels disable printing again
-                        if to_label == None:
+                        if to_label is None:
                             printing = False
-                        else: # else disable when to_label found TODO: fuzzy?
+                        else:  # else disable when to_label found TODO: fuzzy?
                             if label == to_label:
                                 printing = False
                 #indentation -= extra_indent # back to previous indentation
                 indentation = old_indentation # remove indentation
             # print unprocessed rest
-            if printing:
-                write(l[current_start:])
+            if output_file is not None and printing:
+                output_file.write(l[current_start:])
+                output_file.flush()  # TODO: remove
     else:
         eprint("Input file not found.")
 
 
-def init_index(file_to_parse):
+def init_index(input_dir):
     """
     Try to read existing graph index from disk.
     """
     global index_list
-    global root_path
+    global root_input_path, root_output_path
     global index_file_path
 
-    # find index file in a parent directory
-    file_to_parse_real = os.path.realpath(file_to_parse)
-    current_path = os.path.dirname(file_to_parse_real)  # start in current
-    initial_path = current_path  # save for later
-    while True:  # we escape later
-        # get new path one directory up
-        parent_path = os.path.realpath(os.path.join(current_path,".."))
-        if parent_path == current_path:  # we are at the top and didn't find anything
-            current_path = initial_path
-            break
-        current_path = parent_path  # let's move one dir up
-        # check if here exists a graph file
-        # of course somebody could in between now delete the graph-file, however, this would just
-        # trigger the regeneration of the file at this position.
-        # Therefore, using exists should be considered safe
-        if os.path.exists(os.path.join(current_path, INDEX_FILENAME)):
-            break
-    # we should now know the path where the graph file is or should be saved
-    # try to read it
-    index_file_path = os.path.join(current_path, INDEX_FILENAME)
+    if os.path.exists(os.path.join(root_input_path, INDEX_FILENAME)):
+        # try to read it
+        index_file_path = os.path.join(root_input_path, INDEX_FILENAME)
 
-    try:
-        index_list = yaml.safe_load(open(index_file_path))
-    except:
-        # catch errors like file not found or corrupt data
-        # TODO: treat no write permissions differently (think how and if)
-        # TODO: print warning to stderr
-        index_list = {} # initialize with empty dict
-        # TODO: more initialization necessary?
+        try:
+            index_list = yaml.safe_load(open(index_file_path))
+        except:
+            # catch errors like file not found or corrupt data
+            # TODO: treat no write permissions differently (think how and if)
+            # TODO: print warning to stderr
+            index_list = {} # initialize with empty dict
+            # TODO: more initialization necessary?
 
     if index_list is None:
         index_list = {}
 
-    root_path = current_path
-
+    # update the reference graph by reading all files
     # walk from start_path and init the file-tree
-    for dirpath, dirnames, filenames in os.walk(root_path, topdown=True, followlinks=True):
-        for f in filenames:
-            path_name = os.path.join(dirpath,f)[len(root_path)+1:]  # cut off root-path
+    for dir_path, dir_names, file_names in os.walk(root_input_path, topdown=True, followlinks=True):
+        dir_path_stripped = dir_path[len(root_input_path) + 1:]
+        for f in file_names:
+            base_name_ext_tuple = os.path.splitext(f)
+            if len(base_name_ext_tuple) > 1 \
+                and base_name_ext_tuple[1][1:] in EXTENSIONS:
+                file_type = base_name_ext_tuple[1]
+                parse_file(os.path.join(dir_path_stripped, f), file_type, threshold=1.0, output_file=None)
+            path_name = os.path.join(dir_path, f)[len(root_input_path) + 1:]  # cut off root-path
             if not path_name in index_list:
                 index_list[path_name] = []
 
-    # strip root from current path
-    return file_to_parse_real[len(root_path)+1:]
+
+def parse_directory(input_dir,output_dir):
+    # walk from start_path and init the file-tree
+    # TODO: check last accessed (and also its dependencies) value from index to eventually skip
+    input_dir_real_path = os.path.realpath(input_dir)
+    output_dir_real_path = os.path.realpath(output_dir)
+    for dir_path, dir_names, file_names in os.walk(input_dir_real_path, topdown=True, followlinks=True):
+        dir_path_stripped = dir_path[len(input_dir_real_path)+1:]
+        for f in file_names:
+            src = os.path.join(input_dir_real_path, dir_path_stripped, f)
+            dest = os.path.join(output_dir_real_path, dir_path_stripped, f)
+            base_name_ext_tuple = os.path.splitext(f)
+            if len(base_name_ext_tuple) > 1 \
+                and base_name_ext_tuple[1][1:] in EXTENSIONS:
+                file_type = base_name_ext_tuple[1][1:]
+                output_file = open(dest, "w")
+                parse_file(os.path.join(dir_path_stripped,f), file_type, threshold=1.0, output_file=output_file)
+                output_file.close()
+            else:  # if extension not found, just copy
+                shutil.copy(src, dest)
+            path_name = os.path.join(dir_path, f)[len(root_input_path) + 1:]  # cut off root-path
+            if not path_name in index_list:
+                index_list[path_name] = []
+
+        for d in dir_names:  # create destination dirs if necessary
+            os.mkdirs(os.path.join(output_dir, d), exist_ok=True)
+
+
 
 
 def main():
-    global indentation
-    if len(sys.argv) != 2: # exactly one filename needs to be given
+    global global_indentation, index_file_path
+    global root_input_path, root_output_path
+    if len(sys.argv) != 3: # exactly one input-dir and one output-dir need to be given
         print(USAGE)
         return 1
-    file_to_parse = sys.argv[1]
-    file_to_parse_relative = init_index(file_to_parse)  # try to load graph index or init it
-    indentation = 0  # indentation initially to 0
-    parse_file(file_to_parse_relative, threshold=1.0)
+    global_indentation = 0  # indentation initially to 0
+    input_dir = sys.argv[1]
+    output_dir = sys.argv[2]
+    root_input_path = os.path.realpath(input_dir)
+    root_output_path = os.path.realpath(output_dir)
+    init_index(input_dir)  # try to load graph index or init it
+    parse_directory(input_dir,output_dir)  # parse all files recursively
 
     # write back index file
     yaml.dump(index_list, open(index_file_path,"w"))  # TODO:consider backups
 
-    return 0 # success
+    return 0  # success
 
 
 if __name__ == '__main__':

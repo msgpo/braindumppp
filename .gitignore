@@ -1,6 +1,6 @@
 ### Project specific ignores
 # ignore the examples at the moment
-example
+private
 
 #### gitignore default file for python from https://github.com/github/gitignore/blob/master/Python.gitignore
 # Byte-compiled / optimized / DLL files
